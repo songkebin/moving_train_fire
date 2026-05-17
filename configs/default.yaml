@@ -1,0 +1,52 @@
+data:
+  root: data
+  excel_files:
+    0: data/data_0.xlsx
+    1: data/data_1.xlsx
+  environments: [0, 1]
+  image_size: [224, 224]
+  image_mean: [0.485, 0.456, 0.406]
+  image_std: [0.229, 0.224, 0.225]
+  position_scale: 11.0
+  strict_alignment: true
+  val_fraction: 0.2
+  random_seed: 42
+  num_workers: 4
+  pin_memory: true
+  target_standardization:
+    enabled: true
+    mode: per_sensor
+    epsilon: 0.000001
+
+model:
+  image_size: [224, 224]
+  image_backbone: vit_b_16
+  pretrained_backbone: true
+  trainable_backbone: true
+  patch_size: 16
+  in_channels: 3
+  embed_dim: 768
+  image_depth: 4
+  physical_depth: 1
+  fusion_depth: 2
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.1
+  num_envs: 2
+  num_speeds: 8
+  num_hrr: 7
+  output_rows: 5
+  output_cols: 9
+
+train:
+  batch_size: 8
+  epochs: 20
+  learning_rate: 0.0003
+  min_learning_rate: 0.000001
+  lr_scheduler: cosine
+  weight_decay: 0.0001
+  output_dir: outputs
+  checkpoint_dir: outputs/checkpoints
+  amp: true
+  max_train_batches:
+  max_val_batches:

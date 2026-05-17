@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "move-train"
+version = "0.1.0"
+description = "Multimodal Transformer prototype for moving train fire temperature-field prediction."
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "torchvision",
+  "pandas",
+  "openpyxl",
+  "pillow",
+  "numpy",
+  "pyyaml",
+  "tqdm",
+  "scikit-learn",
+  "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

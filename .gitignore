@@ -1,0 +1,43 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Packaging and virtual environments
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+condaenv.*.requirements.txt
+
+# Extra docs
+docs/
+AGENTS.md
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Project data and generated artifacts
+data/
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Logs and temporary files
+*.log
+tmp/
+temp/

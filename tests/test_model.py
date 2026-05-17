@@ -1,0 +1,32 @@
+from __future__ import annotations
+
+import torch
+
+from move_train.model import MultiModalTransformer
+
+
+def test_model_forward_shape_and_backward() -> None:
+    model = MultiModalTransformer(
+        image_size=(32, 32),
+        image_backbone="custom",
+        pretrained_backbone=False,
+        patch_size=8,
+        embed_dim=32,
+        image_depth=1,
+        physical_depth=1,
+        fusion_depth=1,
+        num_heads=4,
+        dropout=0.0,
+    )
+    prediction = model(
+        image=torch.randn(2, 3, 32, 32),
+        env=torch.tensor([0, 1]),
+        speed=torch.tensor([1, 7]),
+        hrr=torch.tensor([1, 6]),
+        position=torch.tensor([0.1, 0.9]),
+    )
+
+    assert prediction.shape == (2, 5, 9)
+    loss = prediction.square().mean()
+    loss.backward()
+    assert all(param.grad is not None for param in model.parameters() if param.requires_grad)

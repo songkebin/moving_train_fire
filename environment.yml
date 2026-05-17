@@ -1,0 +1,22 @@
+name: move-train
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch
+  - pytorch-cuda=12.1
+  - torchvision
+  - pandas
+  - openpyxl
+  - pillow
+  - numpy
+  - pyyaml
+  - tqdm
+  - scikit-learn
+  - matplotlib
+  - pytest
+  - pip:
+      - -e .
