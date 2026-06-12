@@ -56,6 +56,8 @@ def predict_single(
     speed: int,
     hrr: int,
     position: float,
+    speed_value: float | None = None,
+    hrr_value: float | None = None,
 ) -> np.ndarray:
     data_cfg = config["data"]
     image = load_image_tensor(
@@ -70,6 +72,12 @@ def predict_single(
         "env": torch.tensor([env], dtype=torch.long, device=device),
         "speed": torch.tensor([speed], dtype=torch.long, device=device),
         "hrr": torch.tensor([hrr], dtype=torch.long, device=device),
+        "speed_value": torch.tensor(
+            [speed if speed_value is None else speed_value], dtype=torch.float32, device=device
+        ),
+        "hrr_value": torch.tensor(
+            [hrr if hrr_value is None else hrr_value], dtype=torch.float32, device=device
+        ),
         "position": torch.tensor([position / position_scale], dtype=torch.float32, device=device),
     }
     with torch.no_grad():
@@ -94,6 +102,8 @@ def predict_dataset(
             "env": sample["env"].view(1).to(device),
             "speed": sample["speed"].view(1).to(device),
             "hrr": sample["hrr"].view(1).to(device),
+            "speed_value": sample["speed_value"].view(1).to(device),
+            "hrr_value": sample["hrr_value"].view(1).to(device),
             "position": sample["position"].view(1).to(device),
         }
         with torch.no_grad():
@@ -113,8 +123,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="Limit dataset predictions.")
     parser.add_argument("--image", default=None, help="Optional single image path.")
     parser.add_argument("--env", type=int, default=None, help="Environment token for single-image prediction.")
-    parser.add_argument("--speed", type=int, default=None, help="Speed token for single-image prediction.")
-    parser.add_argument("--hrr", type=int, default=None, help="HRR token for single-image prediction.")
+    parser.add_argument("--speed", type=int, default=None, help="Speed category ID for single-image prediction.")
+    parser.add_argument("--hrr", type=int, default=None, help="HRR category ID for single-image prediction.")
+    parser.add_argument("--speed-value", type=float, default=None, help="Physical speed value for single-image prediction.")
+    parser.add_argument("--hrr-value", type=float, default=None, help="Physical HRR value for single-image prediction.")
     parser.add_argument("--position", type=float, default=None, help="Position value for single-image prediction.")
     return parser.parse_args()
 
@@ -139,6 +151,8 @@ def main() -> None:
             speed=args.speed,
             hrr=args.hrr,
             position=args.position,
+            speed_value=args.speed_value,
+            hrr_value=args.hrr_value,
         )
         save_temperature_csv(output_dir / "single_prediction.csv", prediction)
         save_temperature_png(output_dir / "single_prediction.png", prediction)

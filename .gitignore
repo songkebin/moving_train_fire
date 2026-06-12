@@ -21,6 +21,7 @@ condaenv.*.requirements.txt
 # Extra docs
 docs/
 AGENTS.md
+CLAUDE.md
 
 # Local editor and OS files
 .DS_Store

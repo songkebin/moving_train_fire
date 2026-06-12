@@ -32,6 +32,13 @@ class SampleRecord:
     sheet_name: str
     row_index: int
     frame_index: int
+    sample_id: str | None = None
+    run_id: str | None = None
+    source: str | None = None
+    motion_regime: str | None = None
+    environment_name: str | None = None
+    speed_value: float | None = None
+    hrr_value: float | None = None
 
 
 def _as_path(path: str | Path, base: Path | None = None) -> Path:
@@ -154,9 +161,115 @@ def _records_for_excel(data_root: Path, excel_path: Path, environment: int) -> l
     return records
 
 
-def build_records(config: dict[str, Any]) -> list[SampleRecord]:
+def _split_sample_ids(split_path: Path | None) -> set[str] | None:
+    if split_path is None:
+        return None
+    if not split_path.exists():
+        raise FileNotFoundError(f"Split file not found: {split_path}")
+    split_df = pd.read_csv(split_path)
+    if "sample_id" not in split_df.columns:
+        raise DataAlignmentError(f"Split file is missing sample_id column: {split_path}")
+    return set(split_df["sample_id"].astype(str))
+
+
+def _records_for_manifest(
+    project_root: Path,
+    manifest_path: Path,
+    split_path: Path | None = None,
+) -> list[SampleRecord]:
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+
+    df = pd.read_csv(manifest_path)
+    required = {
+        "sample_id",
+        "image_path",
+        "table_path",
+        "sheet_name",
+        "row_index",
+        "frame_index",
+        "environment_id",
+        "speed_id",
+        "hrr_id",
+        "position",
+        *TEMPERATURE_COLUMNS,
+    }
+    missing = sorted(required.difference(df.columns))
+    if missing:
+        raise DataAlignmentError(f"{manifest_path} is missing required columns: {missing}")
+
+    sample_ids = _split_sample_ids(split_path)
+    if sample_ids is not None:
+        df = df[df["sample_id"].astype(str).isin(sample_ids)].copy()
+        discovered = set(df["sample_id"].astype(str))
+        missing_ids = sorted(sample_ids.difference(discovered))
+        if missing_ids:
+            examples = ", ".join(missing_ids[:5])
+            suffix = "" if len(missing_ids) <= 5 else f", plus {len(missing_ids) - 5} more"
+            raise DataAlignmentError(
+                f"{split_path} references sample_id values missing from {manifest_path}: "
+                f"{examples}{suffix}"
+            )
+
+    numeric_columns = [
+        "row_index",
+        "frame_index",
+        "environment_id",
+        "speed_id",
+        "hrr_id",
+        "position",
+        *TEMPERATURE_COLUMNS,
+    ]
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    missing_message = _missing_values_message(manifest_path, manifest_path.name, df[numeric_columns])
+    if missing_message is not None:
+        raise DataAlignmentError(missing_message)
+
+    records: list[SampleRecord] = []
+    for row in df.itertuples(index=False):
+        values = row._asdict()
+        image_path = _as_path(str(values["image_path"]), project_root)
+        if not image_path.exists():
+            raise DataAlignmentError(f"Manifest image path does not exist: {image_path}")
+        target = np.asarray(
+            [float(values[col]) for col in TEMPERATURE_COLUMNS], dtype=np.float32
+        ).reshape(5, 9)
+        records.append(
+            SampleRecord(
+                image_path=image_path,
+                env=int(values["environment_id"]),
+                speed=int(values["speed_id"]),
+                hrr=int(values["hrr_id"]),
+                position=float(values["position"]),
+                target=target,
+                excel_path=_as_path(str(values["table_path"]), project_root),
+                sheet_name=str(values["sheet_name"]),
+                row_index=int(values["row_index"]),
+                frame_index=int(values["frame_index"]),
+                sample_id=str(values["sample_id"]),
+                run_id=str(values["run_id"]) if "run_id" in values else None,
+                source=str(values["source"]) if "source" in values else None,
+                motion_regime=str(values["motion_regime"]) if "motion_regime" in values else None,
+                environment_name=str(values["environment"]) if "environment" in values else None,
+                speed_value=float(values["speed"]) if "speed" in values else None,
+                hrr_value=float(values["hrr"]) if "hrr" in values else None,
+            )
+        )
+    return records
+
+
+def build_records(config: dict[str, Any], split_path: str | Path | None = None) -> list[SampleRecord]:
     data_cfg = config["data"]
     project_root = Path.cwd()
+    if "manifest" in data_cfg:
+        manifest_path = _as_path(data_cfg["manifest"], project_root)
+        split = _as_path(split_path, project_root) if split_path is not None else None
+        records = _records_for_manifest(project_root, manifest_path, split)
+        if not records:
+            raise DataAlignmentError("No samples were discovered from the configured manifest/split.")
+        return records
+
     data_root = _as_path(data_cfg["root"], project_root)
     excel_files = data_cfg["excel_files"]
     environments: Iterable[int] = data_cfg.get("environments", sorted(map(int, excel_files)))
@@ -203,10 +316,14 @@ class TrainFireDataset(Dataset):
         self.target_std: torch.Tensor | None = None
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "TrainFireDataset":
+    def from_config(
+        cls,
+        config: dict[str, Any],
+        split_path: str | Path | None = None,
+    ) -> "TrainFireDataset":
         data_cfg = config["data"]
         dataset = cls(
-            records=build_records(config),
+            records=build_records(config, split_path=split_path),
             image_size=tuple(data_cfg.get("image_size", (224, 224))),
             image_mean=tuple(data_cfg.get("image_mean", (0.485, 0.456, 0.406))),
             image_std=tuple(data_cfg.get("image_std", (0.229, 0.224, 0.225))),
@@ -249,20 +366,17 @@ class TrainFireDataset(Dataset):
     def __len__(self) -> int:
         return len(self.records)
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
+    def sample_without_image(self, index: int) -> dict[str, Any]:
         record = self.records[index]
-        image = load_image_tensor(
-            record.image_path,
-            image_size=self.image_size,
-            image_mean=self.image_mean,
-            image_std=self.image_std,
-        )
         target_raw = torch.from_numpy(record.target)
+        speed_value = record.speed_value if record.speed_value is not None else float(record.speed)
+        hrr_value = record.hrr_value if record.hrr_value is not None else float(record.hrr)
         return {
-            "image": image,
             "env": torch.tensor(record.env, dtype=torch.long),
             "speed": torch.tensor(record.speed, dtype=torch.long),
             "hrr": torch.tensor(record.hrr, dtype=torch.long),
+            "speed_value": torch.tensor(speed_value, dtype=torch.float32),
+            "hrr_value": torch.tensor(hrr_value, dtype=torch.float32),
             "position": torch.tensor(record.position / self.position_scale, dtype=torch.float32),
             "target": self.standardize_target(target_raw),
             "target_raw": target_raw,
@@ -272,8 +386,26 @@ class TrainFireDataset(Dataset):
                 "sheet_name": record.sheet_name,
                 "row_index": record.row_index,
                 "frame_index": record.frame_index,
+                "sample_id": record.sample_id or "",
+                "run_id": record.run_id or "",
+                "source": record.source or "",
+                "motion_regime": record.motion_regime or "",
+                "environment": record.environment_name or "",
+                "speed_value": "" if record.speed_value is None else record.speed_value,
+                "hrr_value": "" if record.hrr_value is None else record.hrr_value,
             },
         }
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        sample = self.sample_without_image(index)
+        record = self.records[index]
+        sample["image"] = load_image_tensor(
+            record.image_path,
+            image_size=self.image_size,
+            image_mean=self.image_mean,
+            image_std=self.image_std,
+        )
+        return sample
 
 
 def load_image_tensor(

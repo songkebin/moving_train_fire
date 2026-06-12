@@ -193,11 +193,18 @@ class MultiModalTransformer(nn.Module):
         num_envs: int = 2,
         num_speeds: int = 8,
         num_hrr: int = 7,
+        use_continuous_physics: bool = False,
+        speed_scale: float = 7.0,
+        hrr_scale: float = 6.0,
         output_rows: int = 5,
         output_cols: int = 9,
     ) -> None:
         super().__init__()
         image_size = tuple(image_size)
+        self.backbone_trainable = bool(trainable_backbone)
+        self.use_continuous_physics = bool(use_continuous_physics)
+        self.speed_scale = float(speed_scale)
+        self.hrr_scale = float(hrr_scale)
         self.output_shape = ModelOutputShape(rows=output_rows, cols=output_cols)
         if image_backbone == "custom":
             self.image_backbone = CustomViTBackbone(
@@ -216,14 +223,29 @@ class MultiModalTransformer(nn.Module):
                 pretrained=pretrained_backbone,
                 trainable=trainable_backbone,
             )
+        if not self.backbone_trainable:
+            for param in self.image_backbone.parameters():
+                param.requires_grad = False
         backbone_dim = int(self.image_backbone.output_dim)
         self.image_projection = (
             nn.Identity() if backbone_dim == embed_dim else nn.Linear(backbone_dim, embed_dim)
         )
 
         self.env_embedding = nn.Embedding(num_envs, embed_dim)
-        self.speed_embedding = nn.Embedding(num_speeds, embed_dim)
-        self.hrr_embedding = nn.Embedding(num_hrr, embed_dim)
+        if self.use_continuous_physics:
+            self.speed_projection = nn.Sequential(
+                nn.Linear(1, embed_dim),
+                nn.GELU(),
+                nn.Linear(embed_dim, embed_dim),
+            )
+            self.hrr_projection = nn.Sequential(
+                nn.Linear(1, embed_dim),
+                nn.GELU(),
+                nn.Linear(embed_dim, embed_dim),
+            )
+        else:
+            self.speed_embedding = nn.Embedding(num_speeds, embed_dim)
+            self.hrr_embedding = nn.Embedding(num_hrr, embed_dim)
         self.position_projection = nn.Sequential(
             nn.Linear(1, embed_dim),
             nn.GELU(),
@@ -277,13 +299,23 @@ class MultiModalTransformer(nn.Module):
             self.image_projection.apply(self._init_module_weights)
         nn.init.trunc_normal_(self.physical_type_embedding, std=0.02)
         self.env_embedding.reset_parameters()
-        self.speed_embedding.reset_parameters()
-        self.hrr_embedding.reset_parameters()
+        if self.use_continuous_physics:
+            self.speed_projection.apply(self._init_module_weights)
+            self.hrr_projection.apply(self._init_module_weights)
+        else:
+            self.speed_embedding.reset_parameters()
+            self.hrr_embedding.reset_parameters()
         self.position_projection.apply(self._init_module_weights)
         self.physical_fusion.apply(self._init_module_weights)
         self.physical_blocks.apply(self._init_module_weights)
         self.fusion_blocks.apply(self._init_module_weights)
         self.head.apply(self._init_module_weights)
+
+    def train(self, mode: bool = True) -> "MultiModalTransformer":
+        super().train(mode)
+        if not self.backbone_trainable:
+            self.image_backbone.eval()
+        return self
 
     def encode_physical(
         self,
@@ -291,13 +323,25 @@ class MultiModalTransformer(nn.Module):
         speed: torch.Tensor,
         hrr: torch.Tensor,
         position: torch.Tensor,
+        speed_value: torch.Tensor | None = None,
+        hrr_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
         position = position.float().view(-1, 1)
+        if self.use_continuous_physics:
+            if speed_value is None:
+                speed_value = speed.float()
+            if hrr_value is None:
+                hrr_value = hrr.float()
+            speed_token = self.speed_projection(speed_value.float().view(-1, 1) / self.speed_scale)
+            hrr_token = self.hrr_projection(hrr_value.float().view(-1, 1) / self.hrr_scale)
+        else:
+            speed_token = self.speed_embedding(speed.long())
+            hrr_token = self.hrr_embedding(hrr.long())
         tokens = torch.stack(
             [
                 self.env_embedding(env.long()),
-                self.speed_embedding(speed.long()),
-                self.hrr_embedding(hrr.long()),
+                speed_token,
+                hrr_token,
                 self.position_projection(position),
             ],
             dim=1,
@@ -315,11 +359,38 @@ class MultiModalTransformer(nn.Module):
         speed: torch.Tensor,
         hrr: torch.Tensor,
         position: torch.Tensor,
+        speed_value: torch.Tensor | None = None,
+        hrr_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        batch_size = image.shape[0]
-        image_tokens = self.image_projection(self.image_backbone(image))
+        if self.backbone_trainable:
+            image_features = self.image_backbone(image)
+        else:
+            with torch.no_grad():
+                image_features = self.image_backbone(image)
+        return self.forward_from_image_features(
+            image_features=image_features,
+            env=env,
+            speed=speed,
+            hrr=hrr,
+            position=position,
+            speed_value=speed_value,
+            hrr_value=hrr_value,
+        )
 
-        physical_tokens = self.encode_physical(env, speed, hrr, position)
+    def forward_from_image_features(
+        self,
+        image_features: torch.Tensor,
+        env: torch.Tensor,
+        speed: torch.Tensor,
+        hrr: torch.Tensor,
+        position: torch.Tensor,
+        speed_value: torch.Tensor | None = None,
+        hrr_value: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        batch_size = image_features.shape[0]
+        image_tokens = self.image_projection(image_features)
+
+        physical_tokens = self.encode_physical(env, speed, hrr, position, speed_value, hrr_value)
         for block in self.fusion_blocks:
             image_tokens = block(image_tokens, physical_tokens)
 

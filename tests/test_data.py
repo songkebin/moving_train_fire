@@ -71,7 +71,65 @@ def test_dataset_returns_expected_tensor_shapes(tmp_path: Path) -> None:
     assert sample["env"].item() == 0
     assert sample["speed"].item() == 1
     assert sample["hrr"].item() == 1
+    assert sample["speed_value"].item() == pytest.approx(1.0)
+    assert sample["hrr_value"].item() == pytest.approx(1.0)
     assert sample["position"].item() == pytest.approx(0.01)
+
+
+def test_manifest_split_records_use_category_ids(tmp_path: Path) -> None:
+    image_path = tmp_path / "raw" / "deceleration" / "0-1.5-1" / "0-1.5-1 (1).png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (12, 8), color=(100, 0, 0)).save(image_path)
+
+    manifest_path = tmp_path / "samples.csv"
+    split_path = tmp_path / "split.csv"
+    row = {
+        "sample_id": "deceleration_0-1.5-1_f001",
+        "run_id": "deceleration_0-1.5-1",
+        "source": "deceleration",
+        "motion_regime": "deceleration",
+        "environment": "tunnel",
+        "environment_id": 0,
+        "image_path": str(image_path),
+        "table_path": str(tmp_path / "deceleration.xlsx"),
+        "sheet_name": "0-1.5-1",
+        "row_index": 0,
+        "frame_index": 1,
+        "speed": 1.5,
+        "speed_id": 2,
+        "hrr": 4,
+        "hrr_id": 3,
+        "position": 0.1,
+        "alignment_status": "ok",
+    }
+    row.update({f"T{i}": float(i) for i in range(1, 46)})
+    pd.DataFrame([row]).to_csv(manifest_path, index=False)
+    pd.DataFrame([{"sample_id": row["sample_id"]}]).to_csv(split_path, index=False)
+
+    config = {
+        "data": {
+            "root": str(tmp_path),
+            "manifest": str(manifest_path),
+            "image_size": [16, 16],
+            "image_mean": [0.0, 0.0, 0.0],
+            "image_std": [1.0, 1.0, 1.0],
+            "position_scale": 10.0,
+        }
+    }
+
+    records = build_records(config, split_path=split_path)
+    dataset = TrainFireDataset.from_config(config, split_path=split_path)
+    sample = dataset[0]
+
+    assert len(records) == 1
+    assert records[0].speed == 2
+    assert records[0].speed_value == 1.5
+    assert records[0].hrr_value == 4.0
+    assert sample["speed"].item() == 2
+    assert sample["hrr"].item() == 3
+    assert sample["speed_value"].item() == pytest.approx(1.5)
+    assert sample["hrr_value"].item() == pytest.approx(4.0)
+    assert sample["metadata"]["motion_regime"] == "deceleration"
 
 
 def test_mismatch_between_rows_and_frames_raises(tmp_path: Path) -> None:

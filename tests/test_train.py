@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 from PIL import Image
 
-from move_train.train import train
+from move_train.train import train, write_split_metrics
 
 
 def _make_training_config(tmp_path: Path) -> dict:
@@ -64,6 +64,9 @@ def _make_training_config(tmp_path: Path) -> dict:
             "num_envs": 2,
             "num_speeds": 8,
             "num_hrr": 7,
+            "use_continuous_physics": True,
+            "speed_scale": 7.0,
+            "hrr_scale": 6.0,
             "output_rows": 5,
             "output_cols": 9,
         },
@@ -85,6 +88,10 @@ def test_train_writes_metrics_and_checkpoints(tmp_path: Path) -> None:
     result = train(_make_training_config(tmp_path), device_name="cpu")
 
     assert result["metrics_path"].exists()
+    assert result["test_metrics_path"] is None
+    metrics = pd.read_csv(result["metrics_path"])
+    assert "train_r2" in metrics.columns
+    assert "val_r2" in metrics.columns
     assert (result["checkpoint_dir"] / "best.pt").exists()
     assert (result["checkpoint_dir"] / "last.pt").exists()
     checkpoint = torch.load(
@@ -96,4 +103,25 @@ def test_train_writes_metrics_and_checkpoints(tmp_path: Path) -> None:
     assert target_cfg["fitted_on"] == "train_split"
     assert len(target_cfg["mean"]) == 5
     assert len(target_cfg["std"][0]) == 9
+    assert "r2" in checkpoint["metrics"]
     assert "scheduler_state_dict" in checkpoint
+
+
+def test_write_split_metrics_includes_r2(tmp_path: Path) -> None:
+    path = tmp_path / "test_metrics.csv"
+    write_split_metrics(
+        path,
+        "test",
+        {
+            "loss": 1.0,
+            "mae": 2.0,
+            "mse": 3.0,
+            "rmse": 4.0,
+            "r2": 0.5,
+        },
+    )
+
+    metrics = pd.read_csv(path)
+    assert list(metrics.columns) == ["split", "loss", "mae", "mse", "rmse", "r2"]
+    assert metrics.loc[0, "split"] == "test"
+    assert metrics.loc[0, "r2"] == 0.5
