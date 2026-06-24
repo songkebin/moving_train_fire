@@ -56,6 +56,9 @@ def forward_batch(model: nn.Module, batch: dict[str, Any]) -> torch.Tensor:
     if "image_features" in batch:
         kwargs["image_features"] = batch["image_features"]
         return model.forward_from_image_features(**kwargs)
+    if not getattr(model, "uses_image", True):
+        kwargs["image_features"] = None
+        return model.forward_from_image_features(**kwargs)
     kwargs["image"] = batch["image"]
     return model(**kwargs)
 
@@ -76,6 +79,17 @@ class CachedImageFeatureDataset(Dataset):
         sample = self.dataset.sample_without_image(index)
         sample["image_features"] = self.image_features[index].float()
         return sample
+
+
+class MetadataOnlyDataset(Dataset):
+    def __init__(self, dataset: TrainFireDataset) -> None:
+        self.dataset = dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.dataset.sample_without_image(index)
 
 
 def cache_image_features(
@@ -446,10 +460,19 @@ def train(config: dict[str, Any], device_name: str | None = None) -> dict[str, A
         model.load_state_dict(checkpoint["model_state_dict"])
         print(f"Loaded initial checkpoint: {init_checkpoint}")
 
+    if not getattr(model, "uses_image", True):
+        if isinstance(train_dataset, TrainFireDataset):
+            train_dataset = MetadataOnlyDataset(train_dataset)
+        if isinstance(val_dataset, TrainFireDataset):
+            val_dataset = MetadataOnlyDataset(val_dataset)
+        if isinstance(test_dataset, TrainFireDataset):
+            test_dataset = MetadataOnlyDataset(test_dataset)
+
     cache_frozen_image_features = (
         bool(train_cfg.get("cache_frozen_image_features", False))
         and isinstance(train_dataset, TrainFireDataset)
         and isinstance(val_dataset, TrainFireDataset)
+        and getattr(model, "uses_image", True)
         and not model.backbone_trainable
     )
     if cache_frozen_image_features:

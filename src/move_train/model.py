@@ -119,12 +119,17 @@ class CustomViTBackbone(nn.Module):
         return image_tokens
 
 
-class TorchvisionViTBackbone(nn.Module):
-    WEIGHTS_BY_NAME = {
+class TorchvisionBackbone(nn.Module):
+    VIT_WEIGHTS_BY_NAME = {
         "vit_b_16": "ViT_B_16_Weights",
         "vit_b_32": "ViT_B_32_Weights",
         "vit_l_16": "ViT_L_16_Weights",
         "vit_l_32": "ViT_L_32_Weights",
+    }
+    CNN_WEIGHTS_BY_NAME = {
+        "resnet50": "ResNet50_Weights",
+        "efficientnet_b0": "EfficientNet_B0_Weights",
+        "convnext_tiny": "ConvNeXt_Tiny_Weights",
     }
 
     def __init__(
@@ -138,34 +143,102 @@ class TorchvisionViTBackbone(nn.Module):
             import torchvision.models as models
         except ImportError as exc:
             raise ImportError(
-                "torchvision is required for pretrained ViT backbones. "
+                "torchvision is required for pretrained image backbones. "
                 "Install the project environment from environment.yml or install torchvision."
             ) from exc
 
         if not hasattr(models, name):
-            choices = ", ".join(sorted(self.WEIGHTS_BY_NAME))
-            raise ValueError(f"Unsupported torchvision ViT backbone {name!r}. Choices: {choices}")
+            choices = ", ".join(
+                sorted(set(self.VIT_WEIGHTS_BY_NAME) | set(self.CNN_WEIGHTS_BY_NAME))
+            )
+            raise ValueError(f"Unsupported torchvision backbone {name!r}. Choices: {choices}")
 
         weights = None
         if pretrained:
-            weights_name = self.WEIGHTS_BY_NAME.get(name)
+            weights_name = self.VIT_WEIGHTS_BY_NAME.get(name, self.CNN_WEIGHTS_BY_NAME.get(name))
             if weights_name is None or not hasattr(models, weights_name):
                 raise ValueError(f"No torchvision weights enum is configured for {name!r}")
             weights = getattr(models, weights_name).DEFAULT
 
         self.model = getattr(models, name)(weights=weights)
-        self.output_dim = int(self.model.hidden_dim)
+        self.is_vit = name in self.VIT_WEIGHTS_BY_NAME
+        if self.is_vit:
+            self.output_dim = int(self.model.hidden_dim)
+        elif name.startswith("resnet"):
+            self.output_dim = int(self.model.fc.in_features)
+            self.model.fc = nn.Identity()
+        elif name.startswith("efficientnet"):
+            self.output_dim = int(self.model.classifier[-1].in_features)
+            self.model.classifier = nn.Identity()
+        elif name.startswith("convnext"):
+            self.output_dim = int(self.model.classifier[-1].in_features)
+            self.model.classifier[-1] = nn.Identity()
+        else:
+            raise ValueError(f"Unsupported torchvision backbone head layout for {name!r}")
 
         if not trainable:
             for param in self.model.parameters():
                 param.requires_grad = False
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
+        if not self.is_vit:
+            return self.model(image).unsqueeze(1)
         tokens = self.model._process_input(image)
         batch_size = tokens.shape[0]
         cls_token = self.model.class_token.expand(batch_size, -1, -1)
         tokens = torch.cat([cls_token, tokens], dim=1)
         return self.model.encoder(tokens)
+
+
+class TimmBackbone(nn.Module):
+    def __init__(
+        self,
+        name: str,
+        image_size: tuple[int, int],
+        pretrained: bool = True,
+        trainable: bool = True,
+    ) -> None:
+        super().__init__()
+        try:
+            import timm
+        except ImportError as exc:
+            raise ImportError(
+                "timm is required for timm image backbones. "
+                "Install the project environment from environment.yml or install timm."
+            ) from exc
+
+        self.model = timm.create_model(
+            name,
+            pretrained=pretrained,
+            num_classes=0,
+            global_pool="avg",
+        )
+        self.output_dim = self._infer_output_dim(image_size)
+
+        if not trainable:
+            for param in self.model.parameters():
+                param.requires_grad = False
+
+    def _forward_features(self, image: torch.Tensor) -> torch.Tensor:
+        features = self.model(image)
+        if features.ndim == 4:
+            features = features.mean(dim=(-2, -1))
+        elif features.ndim == 3:
+            features = features.mean(dim=1)
+        return features
+
+    def _infer_output_dim(self, image_size: tuple[int, int]) -> int:
+        was_training = self.model.training
+        self.model.eval()
+        height, width = image_size
+        with torch.no_grad():
+            features = self._forward_features(torch.zeros(1, 3, height, width))
+        self.model.train(was_training)
+        return int(features.shape[-1])
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        features = self._forward_features(image)
+        return features.unsqueeze(1)
 
 
 @dataclass(frozen=True)
@@ -198,15 +271,31 @@ class MultiModalTransformer(nn.Module):
         hrr_scale: float = 6.0,
         output_rows: int = 5,
         output_cols: int = 9,
+        input_mode: str = "multimodal",
+        fusion_mode: str = "cross_attention",
     ) -> None:
         super().__init__()
         image_size = tuple(image_size)
+        allowed_input_modes = {"multimodal", "image_only", "physics_only"}
+        if input_mode not in allowed_input_modes:
+            choices = ", ".join(sorted(allowed_input_modes))
+            raise ValueError(f"Unsupported input_mode {input_mode!r}. Choices: {choices}")
+        allowed_fusion_modes = {"cross_attention", "concat"}
+        if fusion_mode not in allowed_fusion_modes:
+            choices = ", ".join(sorted(allowed_fusion_modes))
+            raise ValueError(f"Unsupported fusion_mode {fusion_mode!r}. Choices: {choices}")
+        if input_mode != "multimodal" and fusion_mode != "cross_attention":
+            raise ValueError("fusion_mode only applies when input_mode is 'multimodal'.")
+        self.input_mode = input_mode
+        self.fusion_mode = fusion_mode
+        self.uses_image = input_mode in {"multimodal", "image_only"}
+        self.uses_physics = input_mode in {"multimodal", "physics_only"}
         self.backbone_trainable = bool(trainable_backbone)
         self.use_continuous_physics = bool(use_continuous_physics)
         self.speed_scale = float(speed_scale)
         self.hrr_scale = float(hrr_scale)
         self.output_shape = ModelOutputShape(rows=output_rows, cols=output_cols)
-        if image_backbone == "custom":
+        if self.uses_image and image_backbone == "custom":
             self.image_backbone = CustomViTBackbone(
                 image_size=image_size,
                 patch_size=patch_size,
@@ -217,61 +306,90 @@ class MultiModalTransformer(nn.Module):
                 mlp_ratio=mlp_ratio,
                 dropout=dropout,
             )
-        else:
-            self.image_backbone = TorchvisionViTBackbone(
+        elif self.uses_image and image_backbone.startswith("timm:"):
+            self.image_backbone = TimmBackbone(
+                name=image_backbone.removeprefix("timm:"),
+                image_size=image_size,
+                pretrained=pretrained_backbone,
+                trainable=trainable_backbone,
+            )
+        elif self.uses_image:
+            self.image_backbone = TorchvisionBackbone(
                 name=image_backbone,
                 pretrained=pretrained_backbone,
                 trainable=trainable_backbone,
             )
-        if not self.backbone_trainable:
+        else:
+            self.image_backbone = None
+        if self.uses_image and not self.backbone_trainable:
             for param in self.image_backbone.parameters():
                 param.requires_grad = False
-        backbone_dim = int(self.image_backbone.output_dim)
-        self.image_projection = (
-            nn.Identity() if backbone_dim == embed_dim else nn.Linear(backbone_dim, embed_dim)
-        )
+        if self.uses_image:
+            backbone_dim = int(self.image_backbone.output_dim)
+            self.image_projection = (
+                nn.Identity() if backbone_dim == embed_dim else nn.Linear(backbone_dim, embed_dim)
+            )
+        else:
+            self.image_projection = None
 
-        self.env_embedding = nn.Embedding(num_envs, embed_dim)
-        if self.use_continuous_physics:
-            self.speed_projection = nn.Sequential(
+        if self.uses_physics:
+            self.env_embedding = nn.Embedding(num_envs, embed_dim)
+            if self.use_continuous_physics:
+                self.speed_projection = nn.Sequential(
+                    nn.Linear(1, embed_dim),
+                    nn.GELU(),
+                    nn.Linear(embed_dim, embed_dim),
+                )
+                self.hrr_projection = nn.Sequential(
+                    nn.Linear(1, embed_dim),
+                    nn.GELU(),
+                    nn.Linear(embed_dim, embed_dim),
+                )
+            else:
+                self.speed_embedding = nn.Embedding(num_speeds, embed_dim)
+                self.hrr_embedding = nn.Embedding(num_hrr, embed_dim)
+            self.position_projection = nn.Sequential(
                 nn.Linear(1, embed_dim),
                 nn.GELU(),
                 nn.Linear(embed_dim, embed_dim),
             )
-            self.hrr_projection = nn.Sequential(
-                nn.Linear(1, embed_dim),
+            self.physical_type_embedding = nn.Parameter(torch.zeros(1, 4, embed_dim))
+            self.physical_fusion = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, embed_dim),
                 nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(embed_dim, embed_dim),
+            )
+            self.physical_blocks = nn.ModuleList(
+                [
+                    SelfAttentionBlock(embed_dim, num_heads, mlp_ratio, dropout)
+                    for _ in range(physical_depth)
+                ]
+            )
+        else:
+            self.env_embedding = None
+            self.physical_blocks = nn.ModuleList()
+        if self.input_mode == "multimodal" and self.fusion_mode == "cross_attention":
+            self.fusion_blocks = nn.ModuleList(
+                [
+                    CrossAttentionBlock(embed_dim, num_heads, mlp_ratio, dropout)
+                    for _ in range(fusion_depth)
+                ]
+            )
+        else:
+            self.fusion_blocks = nn.ModuleList()
+        self.norm = nn.LayerNorm(embed_dim)
+        if self.input_mode == "multimodal" and self.fusion_mode == "concat":
+            self.concat_fusion = nn.Sequential(
+                nn.LayerNorm(embed_dim * 2),
+                nn.Linear(embed_dim * 2, embed_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
                 nn.Linear(embed_dim, embed_dim),
             )
         else:
-            self.speed_embedding = nn.Embedding(num_speeds, embed_dim)
-            self.hrr_embedding = nn.Embedding(num_hrr, embed_dim)
-        self.position_projection = nn.Sequential(
-            nn.Linear(1, embed_dim),
-            nn.GELU(),
-            nn.Linear(embed_dim, embed_dim),
-        )
-        self.physical_type_embedding = nn.Parameter(torch.zeros(1, 4, embed_dim))
-        self.physical_fusion = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim, embed_dim),
-        )
-        self.physical_blocks = nn.ModuleList(
-            [
-                SelfAttentionBlock(embed_dim, num_heads, mlp_ratio, dropout)
-                for _ in range(physical_depth)
-            ]
-        )
-        self.fusion_blocks = nn.ModuleList(
-            [
-                CrossAttentionBlock(embed_dim, num_heads, mlp_ratio, dropout)
-                for _ in range(fusion_depth)
-            ]
-        )
-        self.norm = nn.LayerNorm(embed_dim)
+            self.concat_fusion = None
         self.head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
@@ -297,23 +415,26 @@ class MultiModalTransformer(nn.Module):
             self.image_backbone.apply(self._init_module_weights)
         if isinstance(self.image_projection, nn.Linear):
             self.image_projection.apply(self._init_module_weights)
-        nn.init.trunc_normal_(self.physical_type_embedding, std=0.02)
-        self.env_embedding.reset_parameters()
-        if self.use_continuous_physics:
-            self.speed_projection.apply(self._init_module_weights)
-            self.hrr_projection.apply(self._init_module_weights)
-        else:
-            self.speed_embedding.reset_parameters()
-            self.hrr_embedding.reset_parameters()
-        self.position_projection.apply(self._init_module_weights)
-        self.physical_fusion.apply(self._init_module_weights)
-        self.physical_blocks.apply(self._init_module_weights)
+        if self.uses_physics:
+            nn.init.trunc_normal_(self.physical_type_embedding, std=0.02)
+            self.env_embedding.reset_parameters()
+            if self.use_continuous_physics:
+                self.speed_projection.apply(self._init_module_weights)
+                self.hrr_projection.apply(self._init_module_weights)
+            else:
+                self.speed_embedding.reset_parameters()
+                self.hrr_embedding.reset_parameters()
+            self.position_projection.apply(self._init_module_weights)
+            self.physical_fusion.apply(self._init_module_weights)
+            self.physical_blocks.apply(self._init_module_weights)
         self.fusion_blocks.apply(self._init_module_weights)
+        if self.concat_fusion is not None:
+            self.concat_fusion.apply(self._init_module_weights)
         self.head.apply(self._init_module_weights)
 
     def train(self, mode: bool = True) -> "MultiModalTransformer":
         super().train(mode)
-        if not self.backbone_trainable:
+        if self.uses_image and not self.backbone_trainable:
             self.image_backbone.eval()
         return self
 
@@ -326,6 +447,8 @@ class MultiModalTransformer(nn.Module):
         speed_value: torch.Tensor | None = None,
         hrr_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if not self.uses_physics:
+            raise RuntimeError("encode_physical was called for an image-only model.")
         position = position.float().view(-1, 1)
         if self.use_continuous_physics:
             if speed_value is None:
@@ -362,11 +485,14 @@ class MultiModalTransformer(nn.Module):
         speed_value: torch.Tensor | None = None,
         hrr_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.backbone_trainable:
-            image_features = self.image_backbone(image)
-        else:
-            with torch.no_grad():
+        if self.uses_image:
+            if self.backbone_trainable:
                 image_features = self.image_backbone(image)
+            else:
+                with torch.no_grad():
+                    image_features = self.image_backbone(image)
+        else:
+            image_features = None
         return self.forward_from_image_features(
             image_features=image_features,
             env=env,
@@ -379,7 +505,7 @@ class MultiModalTransformer(nn.Module):
 
     def forward_from_image_features(
         self,
-        image_features: torch.Tensor,
+        image_features: torch.Tensor | None,
         env: torch.Tensor,
         speed: torch.Tensor,
         hrr: torch.Tensor,
@@ -387,13 +513,32 @@ class MultiModalTransformer(nn.Module):
         speed_value: torch.Tensor | None = None,
         hrr_value: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        batch_size = image_features.shape[0]
-        image_tokens = self.image_projection(image_features)
+        if self.uses_image:
+            if image_features is None:
+                raise RuntimeError("image_features are required for this model.")
+            batch_size = image_features.shape[0]
+            image_tokens = self.image_projection(image_features)
+        else:
+            batch_size = env.shape[0]
+            image_tokens = None
 
-        physical_tokens = self.encode_physical(env, speed, hrr, position, speed_value, hrr_value)
-        for block in self.fusion_blocks:
-            image_tokens = block(image_tokens, physical_tokens)
+        physical_tokens = None
+        if self.uses_physics:
+            physical_tokens = self.encode_physical(
+                env, speed, hrr, position, speed_value, hrr_value
+            )
 
-        pooled = self.norm(image_tokens[:, 0])
+        if self.input_mode == "image_only":
+            pooled = self.norm(image_tokens[:, 0])
+        elif self.input_mode == "physics_only":
+            pooled = self.norm(physical_tokens.mean(dim=1))
+        elif self.fusion_mode == "concat":
+            image_pooled = image_tokens[:, 0]
+            physical_pooled = physical_tokens.mean(dim=1)
+            pooled = self.norm(self.concat_fusion(torch.cat([image_pooled, physical_pooled], dim=1)))
+        else:
+            for block in self.fusion_blocks:
+                image_tokens = block(image_tokens, physical_tokens)
+            pooled = self.norm(image_tokens[:, 0])
         output = self.head(pooled)
         return output.view(batch_size, self.output_shape.rows, self.output_shape.cols)

@@ -1,0 +1,69 @@
+data:
+  root: data
+  manifest: data/manifests/samples.csv
+  splits:
+    train: data/splits/exp_tunnel_random_622_train.csv
+    val: data/splits/exp_tunnel_random_622_val.csv
+    test: data/splits/exp_open_full_test.csv
+    transfer_open: data/splits/transfer_open.csv
+    transfer_decel_tunnel: data/splits/transfer_decel_tunnel.csv
+    transfer_decel_open: data/splits/transfer_decel_open.csv
+  image_size:
+  - 224
+  - 224
+  image_mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  image_std:
+  - 0.229
+  - 0.224
+  - 0.225
+  position_scale: 11.0
+  strict_alignment: true
+  val_fraction: 0.2
+  random_seed: 42
+  num_workers: 4
+  pin_memory: true
+  target_standardization:
+    enabled: true
+    mode: per_sensor
+    epsilon: 1.0e-06
+model:
+  image_size:
+  - 224
+  - 224
+  image_backbone: vit_b_16
+  pretrained_backbone: true
+  trainable_backbone: false
+  patch_size: 16
+  in_channels: 3
+  embed_dim: 768
+  image_depth: 4
+  physical_depth: 1
+  fusion_depth: 2
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.1
+  num_envs: 2
+  num_speeds: 9
+  num_hrr: 6
+  use_continuous_physics: true
+  speed_scale: 7.0
+  hrr_scale: 6.0
+  output_rows: 5
+  output_cols: 9
+  input_mode: physics_only
+train:
+  batch_size: 8
+  epochs: 100
+  learning_rate: 0.0003
+  min_learning_rate: 1.0e-06
+  lr_scheduler: cosine
+  weight_decay: 0.0001
+  output_dir: outputs/exp_cmp_physics_only_tunnel_random622_to_open_full_100ep
+  checkpoint_dir: outputs/exp_cmp_physics_only_tunnel_random622_to_open_full_100ep/checkpoints
+  amp: true
+  max_train_batches: null
+  max_val_batches: null
+  cache_frozen_image_features: false
