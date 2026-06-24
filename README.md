@@ -17,11 +17,11 @@ python -m move_train.train --config configs/default.yaml
 ```
 
 The default configuration reads `data/manifests/samples.csv`, trains on a random
-sample-level split of all constant-speed data, and tests on all deceleration data:
+sample-level split of all tunnel data, and tests on all opensapce data:
 
-- `data/splits/constant_random_train.csv`
-- `data/splits/constant_random_val.csv`
-- `data/splits/deceleration_test.csv`
+- `data/splits/tunnel_train.csv`
+- `data/splits/tunnel_val.csv`
+- `data/splits/opensapce_dataset_test.csv`
 
 Source-domain testing and transfer evaluation splits are prepared under
 `data/splits/`.
